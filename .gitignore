@@ -63,3 +63,6 @@ htmlcov/
 # Project-specific
 # ==============================
 # Add custom ignore rules below
+*.txt
+*.json
+tools/
