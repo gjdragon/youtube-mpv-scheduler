@@ -4,6 +4,9 @@ import subprocess
 import threading
 import time
 import random
+import re
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
@@ -14,7 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QTextEdit, QTabWidget,
     QTableWidget, QTableWidgetItem, QSpinBox, QTimeEdit, QComboBox,
-    QMessageBox, QDialog, QFormLayout, QCheckBox
+    QMessageBox, QDialog, QFormLayout, QCheckBox, QProgressDialog
 )
 from PyQt6.QtCore import Qt, QTimer, QTime, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont
@@ -109,6 +112,67 @@ class URLProvider:
             f.write(url + '\n')
 
 
+class YouTubePlaylistURLFetcher(QThread):
+    """Fetches all video URLs from a YouTube playlist"""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, playlist_url: str):
+        super().__init__()
+        self.playlist_url = playlist_url
+        self.urls = []
+
+    def run(self):
+        """Fetch playlist URLs"""
+        try:
+            self.progress.emit("Fetching playlist information...")
+            self.urls = self.extract_playlist_videos(self.playlist_url)
+            
+            if self.urls:
+                self.progress.emit(f"Found {len(self.urls)} videos")
+                self.finished.emit(self.urls)
+            else:
+                self.error.emit("No videos found in playlist")
+        except Exception as e:
+            self.error.emit(f"Error fetching playlist: {str(e)}")
+
+    def extract_playlist_videos(self, playlist_url: str) -> List[str]:
+        """Extract video IDs from playlist"""
+        try:
+            urls = self.scrape_playlist_html(playlist_url)
+            return urls
+        except Exception as e:
+            raise Exception(f"Failed to extract playlist: {str(e)}")
+
+    def scrape_playlist_html(self, playlist_url: str) -> List[str]:
+        """Scrape playlist page for video URLs"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            req = urllib.request.Request(playlist_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                html = response.read().decode('utf-8')
+            
+            # Extract video IDs from HTML using regex
+            video_ids = set()
+            pattern = r'watch\?v=([a-zA-Z0-9_-]{11})'
+            matches = re.findall(pattern, html)
+            
+            for match in matches:
+                if match not in video_ids:
+                    video_ids.add(match)
+            
+            # Convert to full URLs
+            urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids]
+            return urls
+            
+        except Exception as e:
+            raise Exception(f"Failed to scrape playlist: {str(e)}")
+
+
 class PlaybackWorker(QThread):
     """Runs in separate thread to manage scheduled playback"""
     status_signal = pyqtSignal(str)
@@ -138,7 +202,7 @@ class PlaybackWorker(QThread):
             try:
                 self.check_and_execute_schedule()
                 self.monitor_playback()
-                time.sleep(5)  # Check every 5 seconds
+                time.sleep(5)
             except Exception as e:
                 self.logger.log(f"Error in playback loop: {e}", "ERROR")
                 self.log_signal.emit("ERROR", str(e))
@@ -146,13 +210,12 @@ class PlaybackWorker(QThread):
     def check_and_execute_schedule(self):
         """Check if any schedule entry should start now"""
         if self.playback_active:
-            return  # Already playing, don't start another
+            return
 
         now = datetime.now()
         current_time = now.strftime("%H:%M")
         entry_key = current_time
 
-        # Prevent duplicate execution in the same minute
         if entry_key in self.scheduled_entries_executed:
             return
 
@@ -163,7 +226,6 @@ class PlaybackWorker(QThread):
                 self.execute_playback(entry, now)
                 break
 
-        # Clean up old entries from tracking set (keep only last 2 hours)
         now_hour = now.strftime("%H")
         self.scheduled_entries_executed = {
             k for k in self.scheduled_entries_executed
@@ -175,14 +237,12 @@ class PlaybackWorker(QThread):
         if not self.playback_active:
             return
 
-        # Check if MPV process is still running
         if self.current_process and self.current_process.poll() is not None:
             self.playback_active = False
             self.logger.log("Current video ended, checking for next...")
             self.play_next_video()
             return
 
-        # Check if we should switch to next video based on duration
         if self.playback_start_time and self.playback_duration_minutes:
             elapsed_minutes = (datetime.now() - self.playback_start_time).total_seconds() / 60
             if elapsed_minutes >= self.playback_duration_minutes:
@@ -215,7 +275,6 @@ class PlaybackWorker(QThread):
 
     def execute_playback(self, entry: Dict, scheduled_time: datetime):
         """Execute a single playback session"""
-        # Always get random URL (ignore any URL in schedule entry)
         url = self.url_provider.get_random_url()
         if not url:
             msg = "No random URLs available in youtube_url.txt"
@@ -229,7 +288,6 @@ class PlaybackWorker(QThread):
         self.logger.log(msg, "INFO")
         self.log_signal.emit("PLAYBACK", msg)
 
-        # Store session info
         self.playback_active = True
         self.playback_start_time = scheduled_time
         self.playback_duration_minutes = duration
@@ -247,7 +305,6 @@ class PlaybackWorker(QThread):
             return
 
         try:
-            # Use fullscreen and autofit flags for fullscreen playback
             self.current_process = subprocess.Popen(
                 [self.mpv_path, "--fullscreen", url],
                 stdout=subprocess.DEVNULL,
@@ -347,6 +404,7 @@ class MainWindow(QMainWindow):
         self.config_file = Path("config.json")
         self.mpv_path = self.load_config()
         self.playback_worker: Optional[PlaybackWorker] = None
+        self.fetcher: Optional[YouTubePlaylistURLFetcher] = None
 
         self.init_ui()
         self.start_scheduler()
@@ -358,24 +416,19 @@ class MainWindow(QMainWindow):
         main_widget = QWidget()
         main_layout = QVBoxLayout()
 
-        # Tabs
         tabs = QTabWidget()
 
-        # Schedule Tab
         schedule_tab = self.create_schedule_tab()
         tabs.addTab(schedule_tab, "Schedule")
 
-        # URLs Tab
         urls_tab = self.create_urls_tab()
         tabs.addTab(urls_tab, "Random URLs")
 
-        # Logs Tab
         logs_tab = self.create_logs_tab()
         tabs.addTab(logs_tab, "Logs")
 
         main_layout.addWidget(tabs)
 
-        # Bottom controls
         ctrl_layout = QHBoxLayout()
         
         settings_btn = QPushButton("Settings")
@@ -397,7 +450,6 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout()
 
-        # Schedule table
         self.schedule_table = QTableWidget()
         self.schedule_table.setColumnCount(4)
         self.schedule_table.setHorizontalHeaderLabels(
@@ -409,7 +461,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Schedule:"))
         layout.addWidget(self.schedule_table)
 
-        # Add entry form
         form_layout = QHBoxLayout()
 
         form_layout.addWidget(QLabel("Start Time (HH:MM):"))
@@ -435,6 +486,20 @@ class MainWindow(QMainWindow):
     def create_urls_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout()
+
+        layout.addWidget(QLabel("Download URLs from YouTube Playlist:"))
+        
+        playlist_layout = QHBoxLayout()
+        self.playlist_input = QLineEdit()
+        self.playlist_input.setPlaceholderText("https://www.youtube.com/playlist?list=PLxxxxxx")
+        playlist_layout.addWidget(self.playlist_input)
+        
+        fetch_btn = QPushButton("Fetch & Append URLs")
+        fetch_btn.clicked.connect(self.fetch_playlist_urls)
+        playlist_layout.addWidget(fetch_btn)
+        
+        layout.addLayout(playlist_layout)
+        layout.addWidget(QLabel(""))
 
         layout.addWidget(QLabel("Random YouTube URLs (one per line):"))
 
@@ -520,6 +585,66 @@ class MainWindow(QMainWindow):
             self.logger.log("Updated youtube_url.txt")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+
+    def fetch_playlist_urls(self):
+        """Fetch URLs from YouTube playlist and append to file"""
+        playlist_url = self.playlist_input.text().strip()
+        
+        if not playlist_url:
+            QMessageBox.warning(self, "Input Error", "Please enter a playlist URL")
+            return
+        
+        if "youtube.com/playlist" not in playlist_url:
+            QMessageBox.warning(self, "Input Error", "Please enter a valid YouTube playlist URL")
+            return
+        
+        progress = QProgressDialog("Fetching playlist URLs...", "Cancel", 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.show()
+        
+        self.fetcher = YouTubePlaylistURLFetcher(playlist_url)
+        self.fetcher.finished.connect(lambda urls: self.on_playlist_fetched(urls, progress))
+        self.fetcher.error.connect(lambda msg: self.on_playlist_error(msg, progress))
+        self.fetcher.progress.connect(lambda msg: self.update_progress(msg, progress))
+        self.fetcher.start()
+
+    def on_playlist_fetched(self, urls: List[str], progress):
+        """Handle fetched playlist URLs"""
+        progress.close()
+        
+        if not urls:
+            QMessageBox.warning(self, "No Videos", "No videos found in playlist")
+            return
+        
+        current_text = self.urls_text.toPlainText().strip()
+        existing_urls = set(line.strip() for line in current_text.split('\n') if line.strip())
+        new_urls = [url for url in urls if url not in existing_urls]
+        
+        if new_urls:
+            if current_text:
+                combined = current_text + '\n' + '\n'.join(new_urls)
+            else:
+                combined = '\n'.join(new_urls)
+            
+            self.urls_text.setPlainText(combined)
+            QMessageBox.information(
+                self, "Success",
+                f"Added {len(new_urls)} new URLs from playlist!\n"
+                f"({len(existing_urls)} duplicates skipped)"
+            )
+            self.logger.log(f"Added {len(new_urls)} URLs from playlist")
+        else:
+            QMessageBox.information(self, "Info", "All playlist URLs already exist")
+
+    def on_playlist_error(self, error_msg: str, progress):
+        """Handle playlist fetch error"""
+        progress.close()
+        QMessageBox.critical(self, "Error", error_msg)
+        self.logger.log(f"Playlist fetch error: {error_msg}", "ERROR")
+
+    def update_progress(self, msg: str, progress):
+        """Update progress dialog text"""
+        progress.setLabelText(msg)
 
     def refresh_logs(self):
         logs = self.logger.read_logs(200)
