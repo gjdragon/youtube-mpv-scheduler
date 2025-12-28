@@ -15,6 +15,7 @@ A Windows GUI application that plays random YouTube videos at scheduled times us
 - **Auto Video Switching**: Seamlessly picks the next random video when current one ends
 - **Comprehensive Logging**: All events logged to `timestamps_log.txt` with timestamps
 - **Settings Persistence**: MPV path and schedules saved automatically
+- **Fetch URLs**:Fetch URLs from playlist
 
 ## Requirements
 

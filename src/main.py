@@ -410,7 +410,7 @@ class MainWindow(QMainWindow):
         self.start_scheduler()
 
     def init_ui(self):
-        self.setWindowTitle("YouTube MPV Scheduler")
+        self.setWindowTitle("YouTube MPV Scheduler v0.2.0")
         self.setGeometry(100, 100, 1000, 700)
 
         main_widget = QWidget()
