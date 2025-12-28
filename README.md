@@ -2,6 +2,10 @@
 
 A Windows GUI application that plays random YouTube videos at scheduled times using the MPV player.
 
+## Screenshot
+
+![Screenshot](res/screenshot.png)
+
 ## Features
 
 - **Scheduled Playback**: Set specific times for videos to start
