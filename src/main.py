@@ -26,9 +26,13 @@ from wakeup_monitor import MonitorControl
 
 
 class Logger:
-    """Thread-safe logging to timestamps_log.txt"""
-    def __init__(self, log_file: str = "timestamps_log.txt"):
-        self.log_file = Path(log_file)
+    """Thread-safe logging to logs/ folder with timestamped files"""
+    def __init__(self):
+        self.logs_dir = Path("logs")
+        self.logs_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = self.logs_dir / f"log_{timestamp}.txt"
         self.log_file.touch(exist_ok=True)
 
     def log(self, message: str, level: str = "INFO"):
