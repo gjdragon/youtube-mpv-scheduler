@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QTime, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont
 
+from wakeup_monitor import MonitorControl
+
 
 class Logger:
     """Thread-safe logging to timestamps_log.txt"""
@@ -75,7 +77,8 @@ class ScheduleManager:
         entry = {
             "start_time": start_time,
             "duration_minutes": duration,
-            "youtube_url": url
+            "youtube_url": url,
+            "enabled": True
         }
         self.schedule.append(entry)
         self.save_schedule()
@@ -83,6 +86,11 @@ class ScheduleManager:
     def remove_entry(self, index: int):
         if 0 <= index < len(self.schedule):
             self.schedule.pop(index)
+            self.save_schedule()
+
+    def set_entry_enabled(self, index: int, enabled: bool):
+        if 0 <= index < len(self.schedule):
+            self.schedule[index]["enabled"] = enabled
             self.save_schedule()
 
     def get_schedule(self) -> List[Dict]:
@@ -185,6 +193,7 @@ class PlaybackWorker(QThread):
         self.schedule_mgr = schedule_mgr
         self.url_provider = url_provider
         self.mpv_path = mpv_path
+        self.monitor_control = MonitorControl()
         self.running = True
         self.current_process: Optional[subprocess.Popen] = None
         self.playback_active = False
@@ -221,7 +230,9 @@ class PlaybackWorker(QThread):
 
         for entry in self.schedule_mgr.get_schedule():
             scheduled_time = entry.get("start_time", "")
-            if scheduled_time == current_time:
+            enabled = entry.get("enabled", True)
+            
+            if scheduled_time == current_time and enabled:
                 self.scheduled_entries_executed.add(entry_key)
                 self.execute_playback(entry, now)
                 break
@@ -275,16 +286,20 @@ class PlaybackWorker(QThread):
 
     def execute_playback(self, entry: Dict, scheduled_time: datetime):
         """Execute a single playback session"""
-        url = self.url_provider.get_random_url()
+        # Use entry-specific URL if available, otherwise use random URL
+        url = entry.get("youtube_url", "").strip()
         if not url:
-            msg = "No random URLs available in youtube_url.txt"
+            url = self.url_provider.get_random_url()
+        
+        if not url:
+            msg = "No URL available (no entry URL and no random URLs in youtube_url.txt)"
             self.logger.log(msg, "ERROR")
             self.log_signal.emit("ERROR", msg)
             return
 
         duration = entry.get("duration_minutes", 60)
 
-        msg = f"Starting playback session: {duration}min duration"
+        msg = f"Starting playback session: {duration}min duration, URL: {url}"
         self.logger.log(msg, "INFO")
         self.log_signal.emit("PLAYBACK", msg)
 
@@ -332,9 +347,9 @@ class PlaybackWorker(QThread):
                 self.logger.log(f"Error stopping MPV: {e}", "ERROR")
 
     def wake_system(self):
-        """Wake system from sleep (Windows)"""
+        """Wake system from sleep using MonitorControl"""
         try:
-            ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
+            self.monitor_control.ensure_monitor_on()
             self.logger.log("System wake-up signal sent")
         except Exception as e:
             self.logger.log(f"Could not wake system: {e}", "WARNING")
@@ -410,7 +425,7 @@ class MainWindow(QMainWindow):
         self.start_scheduler()
 
     def init_ui(self):
-        self.setWindowTitle("YouTube MPV Scheduler v0.2.0")
+        self.setWindowTitle("YouTube MPV Scheduler v1.0.0")
         self.setGeometry(100, 100, 1000, 700)
 
         main_widget = QWidget()
@@ -451,13 +466,13 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
 
         self.schedule_table = QTableWidget()
-        self.schedule_table.setColumnCount(4)
+        self.schedule_table.setColumnCount(6)
         self.schedule_table.setHorizontalHeaderLabels(
-            ["Start Time", "Duration (min)", "YouTube URL", "Remove"]
+            ["Start Time", "Duration (min)", "YouTube URL", "Enable", "Disable", "Remove"]
         )
         self.schedule_table.setColumnWidth(0, 100)
         self.schedule_table.setColumnWidth(1, 120)
-        self.schedule_table.setColumnWidth(2, 600)
+        self.schedule_table.setColumnWidth(2, 410)
         layout.addWidget(QLabel("Schedule:"))
         layout.addWidget(self.schedule_table)
 
@@ -466,6 +481,7 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(QLabel("Start Time (HH:MM):"))
         self.time_input = QLineEdit()
         self.time_input.setPlaceholderText("14:30")
+        self.time_input.setFixedWidth(80)
         form_layout.addWidget(self.time_input)
 
         form_layout.addWidget(QLabel("Duration (min):"))
@@ -475,12 +491,19 @@ class MainWindow(QMainWindow):
         self.duration_input.setValue(60)
         form_layout.addWidget(self.duration_input)
 
+        form_layout.addWidget(QLabel("YouTube URL (optional):"))
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=...")
+        self.url_input.setMinimumWidth(300)
+        form_layout.addWidget(self.url_input)
+
         add_btn = QPushButton("Add Entry")
         add_btn.clicked.connect(self.add_schedule_entry)
         form_layout.addWidget(add_btn)
 
         layout.addLayout(form_layout)
         widget.setLayout(layout)
+        self.refresh_schedule_table()
         return widget
 
     def create_urls_tab(self) -> QWidget:
@@ -537,6 +560,7 @@ class MainWindow(QMainWindow):
     def add_schedule_entry(self):
         time_str = self.time_input.text().strip()
         duration = self.duration_input.value()
+        url = self.url_input.text().strip()
 
         if not time_str:
             QMessageBox.warning(self, "Input Error", "Please enter start time")
@@ -548,10 +572,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Input Error", "Invalid time format. Use HH:MM")
             return
 
-        self.schedule_mgr.add_entry(time_str, duration, "")
+        self.schedule_mgr.add_entry(time_str, duration, url)
         self.refresh_schedule_table()
         self.time_input.clear()
-        self.logger.log(f"Added schedule: {time_str} ({duration}min) - random URL")
+        self.url_input.clear()
+        url_info = f" - {url}" if url else " - random URL"
+        self.logger.log(f"Added schedule: {time_str} ({duration}min){url_info}")
 
     def refresh_schedule_table(self):
         self.schedule_table.setRowCount(0)
@@ -564,12 +590,40 @@ class MainWindow(QMainWindow):
             dur_item = QTableWidgetItem(str(entry.get("duration_minutes", 0)))
             self.schedule_table.setItem(idx, 1, dur_item)
 
-            url_item = QTableWidgetItem("(Random URL)")
+            url = entry.get("youtube_url", "")
+            url_display = url if url else "(Random URL)"
+            url_item = QTableWidgetItem(url_display)
             self.schedule_table.setItem(idx, 2, url_item)
 
+            # Enable button
+            enable_btn = QPushButton("Enable")
+            enable_btn.clicked.connect(lambda checked, i=idx: self.enable_schedule_entry(i))
+            self.schedule_table.setCellWidget(idx, 3, enable_btn)
+
+            # Disable button
+            disable_btn = QPushButton("Disable")
+            disable_btn.clicked.connect(lambda checked, i=idx: self.disable_schedule_entry(i))
+            self.schedule_table.setCellWidget(idx, 4, disable_btn)
+
+            # Remove button
             remove_btn = QPushButton("Remove")
             remove_btn.clicked.connect(lambda checked, i=idx: self.remove_schedule_entry(i))
-            self.schedule_table.setCellWidget(idx, 3, remove_btn)
+            self.schedule_table.setCellWidget(idx, 5, remove_btn)
+
+            # Update button states based on enabled status
+            enabled = entry.get("enabled", True)
+            enable_btn.setEnabled(not enabled)
+            disable_btn.setEnabled(enabled)
+
+    def enable_schedule_entry(self, index: int):
+        self.schedule_mgr.set_entry_enabled(index, True)
+        self.refresh_schedule_table()
+        self.logger.log(f"Enabled schedule entry at index {index}")
+
+    def disable_schedule_entry(self, index: int):
+        self.schedule_mgr.set_entry_enabled(index, False)
+        self.refresh_schedule_table()
+        self.logger.log(f"Disabled schedule entry at index {index}")
 
     def remove_schedule_entry(self, index: int):
         self.schedule_mgr.remove_entry(index)

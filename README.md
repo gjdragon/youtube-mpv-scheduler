@@ -5,6 +5,8 @@ A Windows GUI application that plays random YouTube videos at scheduled times us
 ## Screenshot
 
 ![Screenshot](res/screenshot.png)
+![Screenshot](res/screenshot1.png)
+![Screenshot](res/screenshot2.png)
 
 ## Features
 
@@ -34,7 +36,10 @@ A Windows GUI application that plays random YouTube videos at scheduled times us
 2. **Download and install MPV:**
    - Visit https://mpv.io/installation/
 
-3. **Run the application:**
+3. **Download yt-dlp.exe:**
+	- Visit https://github.com/yt-dlp/yt-dlp
+	Put yt-dlp.exe at the same location as mpv.exe
+4. **Run the application:**
    ```bash
    python src/main.py
    ```
@@ -53,7 +58,7 @@ A Windows GUI application that plays random YouTube videos at scheduled times us
 
 Example:
 ```
-https://www.youtube.com/watch?v=dQw4w9WgXcQ
+https://www.youtube.com/watch?v=9bZkp7q19f0
 ```
 
 ### 3. Create Schedule
