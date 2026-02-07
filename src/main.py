@@ -248,22 +248,27 @@ class PlaybackWorker(QThread):
         }
 
     def monitor_playback(self):
-        """Monitor active playback and handle video switching"""
-        if not self.playback_active:
-            return
+            """Monitor active playback and handle video switching"""
+            if not self.playback_active:
+                return
 
-        if self.current_process and self.current_process.poll() is not None:
-            self.playback_active = False
-            self.logger.log("Current video ended, checking for next...")
-            self.play_next_video()
-            return
-
-        if self.playback_start_time and self.playback_duration_minutes:
-            elapsed_minutes = (datetime.now() - self.playback_start_time).total_seconds() / 60
-            if elapsed_minutes >= self.playback_duration_minutes:
-                self.logger.log(f"Scheduled duration ({self.playback_duration_minutes}min) reached")
-                self.stop_mpv()
+            if self.current_process and self.current_process.poll() is not None:
                 self.playback_active = False
+                self.logger.log("Current video ended, checking for next...")
+                self.play_next_video()
+                return
+
+            if self.playback_start_time and self.playback_duration_minutes:
+                elapsed_minutes = (datetime.now() - self.playback_start_time).total_seconds() / 60
+                if elapsed_minutes >= self.playback_duration_minutes:
+                    self.logger.log(f"Scheduled duration ({self.playback_duration_minutes}min) reached")
+                    self.stop_mpv()
+                    self.playback_active = False
+                    # Release display required flag
+                    try:
+                        self.monitor_control.release_display_required()
+                    except Exception as e:
+                        self.logger.log(f"Could not release display flag: {e}", "WARNING")
 
     def play_next_video(self):
         """Play the next random video if still within session duration"""
@@ -337,18 +342,24 @@ class PlaybackWorker(QThread):
             self.playback_active = False
 
     def stop_mpv(self):
-        """Terminate MPV player gracefully"""
-        if self.current_process and self.current_process.poll() is None:
+            """Terminate MPV player gracefully"""
+            if self.current_process and self.current_process.poll() is None:
+                try:
+                    self.current_process.terminate()
+                    self.current_process.wait(timeout=5)
+                    self.logger.log("MPV stopped gracefully")
+                    self.log_signal.emit("PLAYBACK", "MPV stopped")
+                except subprocess.TimeoutExpired:
+                    self.current_process.kill()
+                    self.logger.log("MPV killed (timeout)")
+                except Exception as e:
+                    self.logger.log(f"Error stopping MPV: {e}", "ERROR")
+            
+            # Release display required flag to allow auto-sleep
             try:
-                self.current_process.terminate()
-                self.current_process.wait(timeout=5)
-                self.logger.log("MPV stopped gracefully")
-                self.log_signal.emit("PLAYBACK", "MPV stopped")
-            except subprocess.TimeoutExpired:
-                self.current_process.kill()
-                self.logger.log("MPV killed (timeout)")
+                self.monitor_control.release_display_required()
             except Exception as e:
-                self.logger.log(f"Error stopping MPV: {e}", "ERROR")
+                self.logger.log(f"Could not release display flag: {e}", "WARNING")
 
     def wake_system(self):
         """Wake system from sleep using MonitorControl"""

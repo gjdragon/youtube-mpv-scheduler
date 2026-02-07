@@ -79,6 +79,16 @@ class MonitorControl:
             time.sleep(1)
         return False
 
+    def release_display_required(self):
+            """Release the display required flag to allow system auto-sleep."""
+            try:
+                ES_CONTINUOUS = 0x80000000
+                windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+                self.logger.info("Display required flag released - system can auto-sleep")
+                return True
+            except Exception as e:
+                self.logger.exception("Error releasing display required flag")
+                return False
 
 if __name__ == "__main__":
     logging.basicConfig(
