@@ -136,18 +136,21 @@ class YouTubePlaylistURLFetcher(QThread):
         self.urls = []
 
     def run(self):
-        """Fetch playlist URLs"""
-        try:
-            self.progress.emit("Fetching playlist information...")
-            self.urls = self.extract_playlist_videos(self.playlist_url)
-            
-            if self.urls:
-                self.progress.emit(f"Found {len(self.urls)} videos")
-                self.finished.emit(self.urls)
-            else:
-                self.error.emit("No videos found in playlist")
-        except Exception as e:
-            self.error.emit(f"Error fetching playlist: {str(e)}")
+            """Main playback loop"""
+            self.logger.log("Playback scheduler started")
+            self.log_signal.emit("Scheduler", "Playback scheduler started")
+
+            while self.running:
+                try:
+                    current_time = datetime.now().strftime("%H:%M:%S")
+                    self.logger.log(f"[DEBUG] Loop iteration - Time: {current_time}, Playback active: {self.playback_active}")
+                    
+                    self.check_and_execute_schedule()
+                    self.monitor_playback()
+                    time.sleep(5)
+                except Exception as e:
+                    self.logger.log(f"Error in playback loop: {e}", "ERROR")
+                    self.log_signal.emit("ERROR", str(e))
 
     def extract_playlist_videos(self, playlist_url: str) -> List[str]:
         """Extract video IDs from playlist"""
@@ -221,77 +224,100 @@ class PlaybackWorker(QThread):
                 self.log_signal.emit("ERROR", str(e))
 
     def check_and_execute_schedule(self):
-        """Check if any schedule entry should start now"""
-        if self.playback_active:
-            return
+            """Check if any schedule entry should start now"""
+            if self.playback_active:
+                self.logger.log("[DEBUG] check_and_execute_schedule: Playback already active, skipping")
+                return
 
-        now = datetime.now()
-        current_time = now.strftime("%H:%M")
-        entry_key = current_time
+            now = datetime.now()
+            current_time = now.strftime("%H:%M")
+            entry_key = current_time
 
-        if entry_key in self.scheduled_entries_executed:
-            return
+            if entry_key in self.scheduled_entries_executed:
+                self.logger.log(f"[DEBUG] check_and_execute_schedule: Entry {entry_key} already executed")
+                return
 
-        for entry in self.schedule_mgr.get_schedule():
-            scheduled_time = entry.get("start_time", "")
-            enabled = entry.get("enabled", True)
+            schedule = self.schedule_mgr.get_schedule()
+            self.logger.log(f"[DEBUG] check_and_execute_schedule: Checking {len(schedule)} schedule entries for time {current_time}")
             
-            if scheduled_time == current_time and enabled:
-                self.scheduled_entries_executed.add(entry_key)
-                self.execute_playback(entry, now)
-                break
+            for entry in schedule:
+                scheduled_time = entry.get("start_time", "")
+                enabled = entry.get("enabled", True)
+                
+                self.logger.log(f"[DEBUG] Checking entry: {scheduled_time}, enabled: {enabled}, matches: {scheduled_time == current_time}")
+                
+                if scheduled_time == current_time and enabled:
+                    self.scheduled_entries_executed.add(entry_key)
+                    self.logger.log(f"[DEBUG] Executing scheduled entry for {current_time}")
+                    self.execute_playback(entry, now)
+                    break
 
-        now_hour = now.strftime("%H")
-        self.scheduled_entries_executed = {
-            k for k in self.scheduled_entries_executed
-            if k >= (now - timedelta(hours=2)).strftime("%H:%M")
-        }
+            now_hour = now.strftime("%H")
+            self.scheduled_entries_executed = {
+                k for k in self.scheduled_entries_executed
+                if k >= (now - timedelta(hours=2)).strftime("%H:%M")
+            }
 
     def monitor_playback(self):
             """Monitor active playback and handle video switching"""
             if not self.playback_active:
+                self.logger.log("[DEBUG] monitor_playback: No active playback")
                 return
+
+            self.logger.log(f"[DEBUG] monitor_playback: Monitoring active playback, process alive: {self.current_process and self.current_process.poll() is None}")
 
             if self.current_process and self.current_process.poll() is not None:
                 self.playback_active = False
-                self.logger.log("Current video ended, checking for next...")
+                self.logger.log("[DEBUG] Current video ended, checking for next...")
                 self.play_next_video()
                 return
 
             if self.playback_start_time and self.playback_duration_minutes:
                 elapsed_minutes = (datetime.now() - self.playback_start_time).total_seconds() / 60
+                self.logger.log(f"[DEBUG] Elapsed time: {elapsed_minutes:.2f}/{self.playback_duration_minutes} minutes")
                 if elapsed_minutes >= self.playback_duration_minutes:
                     self.logger.log(f"Scheduled duration ({self.playback_duration_minutes}min) reached")
                     self.stop_mpv()
                     self.playback_active = False
                     # Release display required flag
                     try:
+                        self.logger.log("[DEBUG] Releasing display required flag after duration reached")
                         self.monitor_control.release_display_required()
                     except Exception as e:
                         self.logger.log(f"Could not release display flag: {e}", "WARNING")
 
     def play_next_video(self):
-        """Play the next random video if still within session duration"""
-        if not self.playback_scheduled_entry or not self.playback_start_time:
-            return
+            """Play the next random video if still within session duration"""
+            self.logger.log("[DEBUG] play_next_video called")
+            if not self.playback_scheduled_entry or not self.playback_start_time:
+                self.logger.log("[DEBUG] No scheduled entry or start time, exiting")
+                return
 
-        duration = self.playback_duration_minutes
-        elapsed_minutes = (datetime.now() - self.playback_start_time).total_seconds() / 60
+            duration = self.playback_duration_minutes
+            elapsed_minutes = (datetime.now() - self.playback_start_time).total_seconds() / 60
 
-        if elapsed_minutes < duration:
-            url = self.url_provider.get_random_url()
-            if url:
-                msg = f"Playing next video: {url}"
-                self.logger.log(msg, "INFO")
-                self.log_signal.emit("PLAYBACK", msg)
-                self.start_mpv(url)
+            self.logger.log(f"[DEBUG] play_next_video: {elapsed_minutes:.2f}/{duration} minutes elapsed")
+
+            if elapsed_minutes < duration:
+                url = self.url_provider.get_random_url()
+                if url:
+                    msg = f"Playing next video: {url}"
+                    self.logger.log(msg, "INFO")
+                    self.log_signal.emit("PLAYBACK", msg)
+                    self.start_mpv(url)
+                else:
+                    msg = "No more URLs available"
+                    self.logger.log(msg, "WARNING")
             else:
-                msg = "No more URLs available"
-                self.logger.log(msg, "WARNING")
-        else:
-            msg = "Scheduled duration finished"
-            self.logger.log(msg, "INFO")
-            self.playback_active = False
+                msg = "Scheduled duration finished"
+                self.logger.log(msg, "INFO")
+                self.playback_active = False
+                # Release display flag when session ends
+                try:
+                    self.logger.log("[DEBUG] play_next_video: Releasing display flag - session ended")
+                    self.monitor_control.release_display_required()
+                except Exception as e:
+                    self.logger.log(f"Could not release display flag: {e}", "WARNING")
 
     def execute_playback(self, entry: Dict, scheduled_time: datetime):
         """Execute a single playback session"""
@@ -343,8 +369,10 @@ class PlaybackWorker(QThread):
 
     def stop_mpv(self):
             """Terminate MPV player gracefully"""
+            self.logger.log(f"[DEBUG] stop_mpv called, process exists: {self.current_process is not None}")
             if self.current_process and self.current_process.poll() is None:
                 try:
+                    self.logger.log("[DEBUG] Terminating MPV process")
                     self.current_process.terminate()
                     self.current_process.wait(timeout=5)
                     self.logger.log("MPV stopped gracefully")
@@ -357,17 +385,19 @@ class PlaybackWorker(QThread):
             
             # Release display required flag to allow auto-sleep
             try:
+                self.logger.log("[DEBUG] stop_mpv: Releasing display required flag")
                 self.monitor_control.release_display_required()
             except Exception as e:
                 self.logger.log(f"Could not release display flag: {e}", "WARNING")
 
     def wake_system(self):
-        """Wake system from sleep using MonitorControl"""
-        try:
-            self.monitor_control.ensure_monitor_on()
-            self.logger.log("System wake-up signal sent")
-        except Exception as e:
-            self.logger.log(f"Could not wake system: {e}", "WARNING")
+            """Wake system from sleep using MonitorControl"""
+            try:
+                self.logger.log("[DEBUG] wake_system: Calling ensure_monitor_on()")
+                self.monitor_control.ensure_monitor_on()
+                self.logger.log("System wake-up signal sent")
+            except Exception as e:
+                self.logger.log(f"Could not wake system: {e}", "WARNING")
 
     def stop(self):
         """Stop the scheduler"""
