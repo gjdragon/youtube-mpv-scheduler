@@ -136,21 +136,17 @@ class YouTubePlaylistURLFetcher(QThread):
         self.urls = []
 
     def run(self):
-            """Main playback loop"""
-            self.logger.log("Playback scheduler started")
-            self.log_signal.emit("Scheduler", "Playback scheduler started")
-
-            while self.running:
-                try:
-                    current_time = datetime.now().strftime("%H:%M:%S")
-                    self.logger.log(f"[DEBUG] Loop iteration - Time: {current_time}, Playback active: {self.playback_active}")
-                    
-                    self.check_and_execute_schedule()
-                    self.monitor_playback()
-                    time.sleep(5)
-                except Exception as e:
-                    self.logger.log(f"Error in playback loop: {e}", "ERROR")
-                    self.log_signal.emit("ERROR", str(e))
+            """Fetch video URLs from a YouTube playlist page."""
+            try:
+                self.progress.emit("Fetching playlist page...")
+                urls = self.extract_playlist_videos(self.playlist_url)
+                if urls:
+                    self.progress.emit(f"Found {len(urls)} videos")
+                    self.finished.emit(urls)
+                else:
+                    self.error.emit("No video URLs found in playlist")
+            except Exception as e:
+                self.error.emit(f"Error fetching playlist: {str(e)}")
 
     def extract_playlist_videos(self, playlist_url: str) -> List[str]:
         """Extract video IDs from playlist"""
@@ -304,6 +300,7 @@ class PlaybackWorker(QThread):
                     msg = f"Playing next video: {url}"
                     self.logger.log(msg, "INFO")
                     self.log_signal.emit("PLAYBACK", msg)
+                    self.playback_active = True  # Re-arm so monitor_playback tracks the new process
                     self.start_mpv(url)
                 else:
                     msg = "No more URLs available"
@@ -343,6 +340,7 @@ class PlaybackWorker(QThread):
         self.playback_duration_minutes = duration
         self.playback_scheduled_entry = entry
 
+        self.update_yt_dlp()
         self.wake_system()
         self.start_mpv(url)
 
@@ -366,6 +364,24 @@ class PlaybackWorker(QThread):
             self.logger.log(f"Failed to start MPV: {e}", "ERROR")
             self.log_signal.emit("ERROR", f"Failed to start MPV: {e}")
             self.playback_active = False
+
+    def update_yt_dlp(self):
+        """Update yt-dlp.exe to the latest version before playback"""
+        try:
+            yt_dlp_path = Path(self.mpv_path).parent / "yt-dlp.exe"
+            if yt_dlp_path.exists():
+                self.logger.log(f"Updating yt-dlp at {yt_dlp_path}...")
+                result = subprocess.run(
+                    [str(yt_dlp_path), "-U"],
+                    capture_output=True, text=True, timeout=60
+                )
+                self.logger.log(f"yt-dlp update result: {result.stdout.strip() or result.stderr.strip()}")
+            else:
+                self.logger.log(f"yt-dlp.exe not found at {yt_dlp_path}, skipping update", "WARNING")
+        except subprocess.TimeoutExpired:
+            self.logger.log("yt-dlp update timed out, proceeding anyway", "WARNING")
+        except Exception as e:
+            self.logger.log(f"yt-dlp update failed: {e}, proceeding anyway", "WARNING")
 
     def stop_mpv(self):
             """Terminate MPV player gracefully"""
@@ -470,7 +486,7 @@ class MainWindow(QMainWindow):
         self.start_scheduler()
 
     def init_ui(self):
-        self.setWindowTitle("YouTube MPV Scheduler v1.0.0")
+        self.setWindowTitle("YouTube MPV Scheduler v1.2.0")
         self.setGeometry(100, 100, 1000, 700)
 
         main_widget = QWidget()
