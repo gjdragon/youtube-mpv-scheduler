@@ -204,6 +204,7 @@ class PlaybackWorker(QThread):
         self.playback_duration_minutes = 0
         self.playback_scheduled_entry: Optional[Dict] = None
         self.scheduled_entries_executed = set()
+        self.manually_stopped = False  # When True, suppresses auto-restart until next scheduled event
 
     def run(self):
         """Main playback loop"""
@@ -244,6 +245,7 @@ class PlaybackWorker(QThread):
                 
                 if scheduled_time == current_time and enabled:
                     self.scheduled_entries_executed.add(entry_key)
+                    self.manually_stopped = False  # New scheduled event clears the manual stop
                     self.logger.log(f"[DEBUG] Executing scheduled entry for {current_time}")
                     self.execute_playback(entry, now)
                     break
@@ -287,6 +289,10 @@ class PlaybackWorker(QThread):
             self.logger.log("[DEBUG] play_next_video called")
             if not self.playback_scheduled_entry or not self.playback_start_time:
                 self.logger.log("[DEBUG] No scheduled entry or start time, exiting")
+                return
+
+            if self.manually_stopped:
+                self.logger.log("Playback was manually stopped — not auto-restarting next video")
                 return
 
             duration = self.playback_duration_minutes
@@ -415,6 +421,34 @@ class PlaybackWorker(QThread):
             except Exception as e:
                 self.logger.log(f"Could not wake system: {e}", "WARNING")
 
+    def manual_stop(self):
+        """Stop playback immediately and suppress auto-restart for this session"""
+        self.logger.log("Manual stop requested")
+        self.manually_stopped = True
+        self.playback_active = False
+        self.stop_mpv()
+        try:
+            self.monitor_control.release_display_required()
+        except Exception:
+            pass
+
+    def manual_play_now(self, url: str = ""):
+        """Immediately start playing, bypassing the schedule"""
+        self.logger.log("Manual play requested")
+        self.manually_stopped = False
+        if not url:
+            url = self.url_provider.get_random_url()
+        if not url:
+            self.logger.log("Manual play: no URL available", "ERROR")
+            return
+        self.playback_active = True
+        self.playback_start_time = datetime.now()
+        self.playback_duration_minutes = 0  # 0 = play indefinitely until manual stop
+        self.playback_scheduled_entry = {"youtube_url": url, "duration_minutes": 0}
+        self.update_yt_dlp()
+        self.wake_system()
+        self.start_mpv(url)
+
     def stop(self):
         """Stop the scheduler"""
         self.running = False
@@ -486,7 +520,7 @@ class MainWindow(QMainWindow):
         self.start_scheduler()
 
     def init_ui(self):
-        self.setWindowTitle("YouTube MPV Scheduler v1.2.0")
+        self.setWindowTitle("YouTube MPV Scheduler v1.3.0")
         self.setGeometry(100, 100, 1000, 700)
 
         main_widget = QWidget()
@@ -512,7 +546,23 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(settings_btn)
         
         ctrl_layout.addStretch()
-        
+
+        self.play_now_btn = QPushButton("▶  Play Now")
+        self.play_now_btn.setFixedWidth(120)
+        self.play_now_btn.setStyleSheet("QPushButton { background-color: #2e7d32; color: white; font-weight: bold; padding: 4px; border-radius: 4px; }"
+                                        "QPushButton:hover { background-color: #388e3c; }")
+        self.play_now_btn.clicked.connect(self.manual_play_now)
+        ctrl_layout.addWidget(self.play_now_btn)
+
+        self.stop_btn = QPushButton("■  Stop")
+        self.stop_btn.setFixedWidth(100)
+        self.stop_btn.setStyleSheet("QPushButton { background-color: #c62828; color: white; font-weight: bold; padding: 4px; border-radius: 4px; }"
+                                    "QPushButton:hover { background-color: #d32f2f; }")
+        self.stop_btn.clicked.connect(self.manual_stop)
+        ctrl_layout.addWidget(self.stop_btn)
+
+        ctrl_layout.addStretch()
+
         refresh_logs_btn = QPushButton("Refresh Logs")
         refresh_logs_btn.clicked.connect(self.refresh_logs)
         ctrl_layout.addWidget(refresh_logs_btn)
@@ -795,6 +845,16 @@ class MainWindow(QMainWindow):
             )
             self.playback_worker.log_signal.connect(self.on_worker_log)
             self.playback_worker.start()
+
+    def manual_stop(self):
+        if self.playback_worker:
+            self.playback_worker.manual_stop()
+            self.logger.log("Manual stop triggered from GUI")
+
+    def manual_play_now(self):
+        if self.playback_worker:
+            self.playback_worker.manual_play_now()
+            self.logger.log("Manual play triggered from GUI")
 
     def on_worker_log(self, level: str, message: str):
         self.refresh_logs()
